@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Header, Request, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 import requests
 import hmac
@@ -10,9 +11,20 @@ from collections import defaultdict
 app = FastAPI(title="DoGrade Ultimate API", version="3.0.0")
 
 # ==========================================
-# 1. การตั้งค่าความปลอดภัย (Security Config)
+# 1. การตั้งค่า CORS (แก้ปัญหา Failed to fetch)
 # ==========================================
-SECRET_API_KEY = "DKtIsmp3/1/68" # รหัสลับ (ตรงกับฝั่งแอป)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # อนุญาตให้ทุกหน้าเว็บ (โดเมน) เรียกใช้ API ได้
+    allow_credentials=True,
+    allow_methods=["*"],  # อนุญาตให้ใช้ทุก Method (GET, POST)
+    allow_headers=["*"],  # อนุญาตทุก Header (รวมถึง x-signature ของเรา)
+)
+
+# ==========================================
+# 2. การตั้งค่าความปลอดภัย (Security Config)
+# ==========================================
+SECRET_API_KEY = "DKtIsmp3/1/68" # รหัสลับ (ตรงกับหน้าเว็บ)
 MAX_TIMESTAMP_DIFF = 60 # ลายเซ็นหมดอายุใน 60 วินาที
 MAX_FAILS = 5           # พิมพ์ผิดได้ 5 ครั้ง
 COOLDOWN_TIME = 30      # โดนแบน 30 วินาที
@@ -29,7 +41,7 @@ TERM_MAP = {
 }
 
 # ==========================================
-# 2. ระบบป้องกันด่านหน้า (Middleware)
+# 3. ระบบป้องกันด่านหน้า (Middleware)
 # ==========================================
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
@@ -50,7 +62,7 @@ async def security_middleware(request: Request, call_next):
     return await call_next(request)
 
 # ==========================================
-# 3. Endpoint สำหรับดึงข้อมูลแบบปลอดภัย
+# 4. Endpoint สำหรับดึงข้อมูลแบบปลอดภัย
 # ==========================================
 @app.post("/api/v1/get_full_grade")
 async def fetch_full_grade(
@@ -105,14 +117,13 @@ def _check_ban(ip):
         ip_fail_tracker[ip]["count"] = 0
 
 # ==========================================
-# 4. ฟังก์ชันดึงและแยกวิเคราะห์ข้อมูล HTML
+# 5. ฟังก์ชันดึงและแยกวิเคราะห์ข้อมูล HTML
 # ==========================================
 def scrape_dograde_full(student_id: str, dob: str, term_name: str, button_id: str):
     url = "http://www.dograde.online/DANKHUNTHOD/default.aspx"
     session = requests.Session()
     
     try:
-        # 1. รับ ViewState เบื้องต้น
         res = session.get(url, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
@@ -120,7 +131,6 @@ def scrape_dograde_full(student_id: str, dob: str, term_name: str, button_id: st
         if not viewstate:
             return {"status": "error", "message": "เซิร์ฟเวอร์โรงเรียนไม่ตอบสนอง"}
             
-        # 2. ส่งข้อมูลเพื่อขอดูเกรด
         payload = {
             "__VIEWSTATE": viewstate["value"],
             "__VIEWSTATEGENERATOR": soup.find("input", id="__VIEWSTATEGENERATOR")["value"] if soup.find("input", id="__VIEWSTATEGENERATOR") else "",
@@ -133,12 +143,10 @@ def scrape_dograde_full(student_id: str, dob: str, term_name: str, button_id: st
         post_res = session.post(url, data=payload, timeout=15)
         soup = BeautifulSoup(post_res.text, 'html.parser')
         
-        # เช็คว่าเข้าสู่ระบบสำเร็จไหม (ตรวจสอบจากช่องชื่อนักเรียน)
         fname_input = soup.find("input", id="fName")
         if not fname_input or not fname_input.get("value"):
             return {"status": "error", "message": "รหัสนักเรียนหรือวันเกิดไม่ถูกต้อง"}
 
-        # --- ฟังก์ชันช่วยดึงข้อมูล ---
         def safe_get_val(element_id):
             el = soup.find("input", id=element_id)
             return el["value"].strip() if el and el.has_attr("value") else "-"
@@ -147,7 +155,6 @@ def scrape_dograde_full(student_id: str, dob: str, term_name: str, button_id: st
             el = soup.find("span", id=element_id)
             return el.text.strip() if el else "-"
 
-        # ข้อมูลนักเรียน
         student_info = {
             "id": safe_get_val("fid"),
             "name": safe_get_val("fName"),
@@ -155,7 +162,6 @@ def scrape_dograde_full(student_id: str, dob: str, term_name: str, button_id: st
             "ordinal": safe_get_val("fOrdinal")
         }
 
-        # ข้อมูลสรุปผล
         summary = {
             "term_title": safe_get_text("LabelHead"),
             "enrolled": {
@@ -171,28 +177,27 @@ def scrape_dograde_full(student_id: str, dob: str, term_name: str, button_id: st
             "gpa": safe_get_text("Label10")
         }
 
-        # ข้อมูลตารางเรียน (รองรับ 13 คอลัมน์แบบตรงเป๊ะจากไฟล์ HTML)
         grades = []
         grade_table = soup.find("table", id="GridView0")
         if grade_table:
             rows = grade_table.find_all("tr")
-            for row in rows[1:]: # ข้ามหัวตาราง
+            for row in rows[1:]: 
                 cols = [td.text.strip() for td in row.find_all("td")]
                 if len(cols) >= 13:
                     grades.append({
-                        "code": cols[0],              # รหัสวิชา
-                        "name": cols[1],              # รายวิชา
-                        "type": cols[2],              # ประเภท
-                        "credit": cols[3],            # หน่วยกิต
-                        "raw_score": cols[4],         # คะแนนรวมหน่วย
-                        "midterm": cols[5],           # กลางภาค
-                        "final": cols[6],             # ปลายภาค
-                        "total_score": cols[7],       # รวมคะแนน
-                        "grade": cols[8],             # ระดับคะแนน (เกรด)
-                        "retake": cols[9],            # แก้ตัว
-                        "character": cols[10],        # คุณลักษณะ
-                        "read_think": cols[11],       # อ่านคิดวิเคราะห์
-                        "teacher": cols[12]           # ครูผู้สอน
+                        "code": cols[0],
+                        "name": cols[1],
+                        "type": cols[2],
+                        "credit": cols[3],
+                        "raw_score": cols[4],
+                        "midterm": cols[5],
+                        "final": cols[6],
+                        "total_score": cols[7],
+                        "grade": cols[8],
+                        "retake": cols[9],
+                        "character": cols[10],
+                        "read_think": cols[11],
+                        "teacher": cols[12]
                     })
 
         return {"status": "success", "data": {"student": student_info, "summary": summary, "grades": grades}}
